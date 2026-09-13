@@ -1,0 +1,10 @@
+{"id":"zh_city","prompt":"请用三句话介绍南京的历史、地理位置和代表性景点。"}
+{"id":"en_science","prompt":"Explain why the sky appears blue in a concise paragraph suitable for a high-school student."}
+{"id":"zh_math","prompt":"计算 137 乘以 29，并分步骤说明你的心算过程。"}
+{"id":"code_python","prompt":"Write a Python function that checks whether a UTF-8 string is a palindrome while ignoring spaces and punctuation, then explain its time complexity."}
+{"id":"translation","prompt":"把下面这句话翻译成自然的英文，并解释两个关键词的选择：端侧推理通过减少对云服务的依赖改善了隐私与离线可用性。"}
+{"id":"reasoning","prompt":"一个房间外有三个开关，房间内有三盏灯。你只能进入房间一次，怎样判断每个开关对应哪盏灯？"}
+{"id":"systems","prompt":"比较模型权重卸载中同步拷贝和异步预取的区别，重点说明 CUDA stream、event 和 pinned memory 各自的作用。"}
+{"id":"creative","prompt":"写一个不超过一百字的科幻微故事，主题是离线运行的人工智能第一次看到星空。"}
+{"id":"algorithm","prompt":"Given an array of integers, describe an O(n) algorithm for finding the maximum sum of a contiguous subarray, including how it handles an array containing only negative values."}
+{"id":"long_context","prompt":"阅读以下背景并给出设计建议：一台工作站有一张 24GB 显卡、128GB 内存和 PCIe 3.0 x16。需要运行权重约 28GB 的 Dense Transformer。每次生成一个 token 都必须依次经过全部 decoder layers，而层权重可保存在 CPU pinned memory。设计时需要同时考虑权重传输、计算、KV Cache 增长、首 token 延迟和稳态吞吐。请提出一个从正确性基线逐步演进到同步卸载、异步预取以及量化传输的实施顺序，并解释每一步需要记录哪些指标以及怎样避免把异步操作的排队时间误认为执行完成。"}

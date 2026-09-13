@@ -1,0 +1,37 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Model checkpoints and tensor artifacts
+models/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+
+# Experiment outputs and profiler captures
+reports/
+outputs/
+*.nsys-rep
+*.sqlite
+*.qdstrm
+*.ncu-rep
+
+# Local project documents and packaged deliveries
+/*.md
+!/README.md
+/*.tar.gz
+/*.zip
+/conda-explicit-spec.txt
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
