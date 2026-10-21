@@ -33,6 +33,58 @@ def build_causal_mask(
     return key_positions <= query_positions
 
 
+def cached_scaled_dot_product_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    *,
+    layer_idx: int,
+    cache: KVCache | None,
+    attention_mask: Tensor | None = None,
+    dropout_p: float = 0.0,
+) -> Tensor:
+    """Run SDPA through either a contiguous or page-aware cache backend."""
+    query_length = query.shape[-2]
+    if cache is not None and hasattr(cache, "attend"):
+        key_length = cache.get_seq_length(layer_idx) + query_length
+    else:
+        if cache is not None:
+            key, value = cache.update(layer_idx, key, value)
+        key_length = key.shape[-2]
+
+    if attention_mask is None and query_length > 1:
+        if key_length == query_length:
+            is_causal = True
+        else:
+            attention_mask = build_causal_mask(
+                query_length, key_length, device=query.device
+            )
+            is_causal = False
+    else:
+        is_causal = False
+
+    if cache is not None and hasattr(cache, "attend"):
+        return cache.attend(  # type: ignore[attr-defined]
+            layer_idx,
+            query,
+            key,
+            value,
+            attention_mask=attention_mask,
+            dropout_p=dropout_p,
+            is_causal=is_causal,
+            enable_gqa=True,
+        )
+    return F.scaled_dot_product_attention(
+        query,
+        key,
+        value,
+        attn_mask=attention_mask,
+        dropout_p=dropout_p,
+        is_causal=is_causal,
+        enable_gqa=True,
+    )
+
+
 class Qwen3Attention(nn.Module):
     def __init__(
         self,
@@ -109,33 +161,14 @@ class Qwen3Attention(nn.Module):
         value = value.transpose(1, 2)
         query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        if cache is not None:
-            key, value = cache.update(self.layer_idx, key, value)
-
-        key_length = key.shape[-2]
-        if attention_mask is None and query_length > 1:
-            # An explicit absolute-position mask is also correct for non-square
-            # cached attention.  For uncached prefill, is_causal=True lets SDPA
-            # select its fastest causal kernel.
-            if key_length == query_length:
-                is_causal = True
-            else:
-                attention_mask = build_causal_mask(
-                    query_length, key_length, device=query.device
-                )
-                is_causal = False
-        else:
-            # A one-token decode query is allowed to attend to all cached keys.
-            is_causal = False
-
-        attention_output = F.scaled_dot_product_attention(
+        attention_output = cached_scaled_dot_product_attention(
             query,
             key,
             value,
-            attn_mask=attention_mask,
+            layer_idx=self.layer_idx,
+            cache=cache,
+            attention_mask=attention_mask,
             dropout_p=self.dropout if self.training else 0.0,
-            is_causal=is_causal,
-            enable_gqa=True,
         )
         attention_output = attention_output.transpose(1, 2).contiguous()
         attention_output = attention_output.view(

@@ -65,8 +65,12 @@ class OffloadedQwen3ForCausalLM:
             ).expand(input_ids.shape[0], -1)
         cos, sin = self.rotary_emb(hidden_states, position_ids)
 
+        if cache is not None and hasattr(cache, "begin_forward"):
+            cache.begin_forward(query_length=input_ids.shape[1])  # type: ignore[attr-defined]
         self.runtime.begin_forward()
         for layer_idx in range(self.config.num_hidden_layers):
+            if cache is not None and hasattr(cache, "before_layer"):
+                cache.before_layer(layer_idx)  # type: ignore[attr-defined]
             with record_function(f"decoder_layer_{layer_idx}"):
                 weights = self.runtime.weights_for(layer_idx)
                 hidden_states = decoder_layer_forward(
@@ -78,8 +82,14 @@ class OffloadedQwen3ForCausalLM:
                     sin,
                     cache=cache,
                 )
+            if getattr(self, "layer_probe_callback", None) is not None:
+                self.layer_probe_callback(layer_idx, hidden_states)
+            if cache is not None and hasattr(cache, "after_layer"):
+                cache.after_layer(layer_idx)  # type: ignore[attr-defined]
             self.runtime.after_layer(layer_idx)
         self.runtime.end_forward()
+        if cache is not None and hasattr(cache, "end_forward"):
+            cache.end_forward()  # type: ignore[attr-defined]
 
         hidden_states = rms_norm(
             hidden_states, self.final_norm, self.config.rms_norm_eps

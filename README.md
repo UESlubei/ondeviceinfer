@@ -1,6 +1,6 @@
 # OnDeviceInfer：Qwen3 端侧大模型推理框架
 
-面向单张消费级 NVIDIA GPU 的大模型推理实验项目。项目以 RTX 3090 24GB 和 Qwen3-14B 为主要目标，围绕显存容量与 PCIe 传输瓶颈，实现权重 Offloading、CUDA 异步 Prefetch、INT8 Weight-only 以及 INT8 KV Cache Offloading。
+面向单张消费级 NVIDIA GPU 的大模型推理实验项目。项目以 RTX 3090 24GB 和 Qwen3-14B 为主要目标，围绕显存容量与 PCIe 传输瓶颈，实现权重 Offloading、CUDA 异步 Prefetch、INT8 Weight-only、AWQ INT4 / Marlin 融合计算以及 INT8 KV Cache Offloading。
 
 > 本仓库只包含源码、测试和基准脚本，不包含模型权重、量化后 Checkpoint、实验报告或 Nsight 原始数据。
 
@@ -11,10 +11,31 @@
 - FP16 权重同步 Offloading；
 - 基于 Pinned Memory、独立 CUDA Stream 和双 Slot 的异步权重 Prefetch；
 - 按输出通道对称 INT8 Weight-only 离线量化与 Resident/Sync/Prefetch 运行时；
+- AWQ W4A16、G=128 激活感知离线校准，支持分层校准和 FP32 校准损失；
+- compressed-tensors INT4 权重加载、Marlin Repack、融合 Linear 和显式 QDQ 参考路径；
 - KV Cache Resident、同步 Offloading 和双 Slot Prefetch；
 - HQQ-compatible Group-wise 8-bit KV Cache 压缩；
 - NVTX、CUDA Event、Nsight Systems 和 SQLite 性能分析工具；
 - 单元测试、正确性验证、质量评测和多种基准脚本。
+
+## AWQ INT4 与 Marlin
+
+AWQ 使用 LLM Compressor 校准，运行时沿用项目自己的 Qwen3 前向与生成循环，调用 vLLM 的 Marlin 算子执行 Linear。项目不通过 vLLM LLMEngine 执行这条推理路径。
+
+加载顺序为：CPU 读取打包 INT4 权重 → H2D → GPU Repack 与 Scale/Zero-point 排列 → 压缩权重常驻。Repack 只在启动时执行；推理时在内核内分块解码和计算，不创建完整 FP16 权重中间矩阵。
+
+RTX 3090、4K 输入、Batch=1、128 输出、权重与 FP16 KV 常驻，完整预热后正式3次取中位数：
+
+| 配置 | Decode 吞吐 | 峰值 allocated |
+| --- | ---: | ---: |
+| 原 INT8 显式反量化 + FP16 GEMM | 5.326 tok/s | 15.517 GiB |
+| AWQ INT4 + Marlin | 26.358 tok/s | 9.260 GiB |
+
+吞吐达到4.95倍，峰值allocated降低40.3%；这是位宽与计算后端共同变化的部署收益。该对照不包含逐Token权重Offloading。
+
+独立中文/英文源文本各65,536输入Tokens、窗口1024，AWQ Marlin的PPL相对原FP16增加2.12%/2.99%；96条固定上下文共1536个位置Top1一致率94.40%。自由生成96条中仅3条完整128 Token相同，不能表述为回答准确率94.40%或精度无损。
+
+安装、校准、算子验证、性能和质量评测命令见 **[AWQ 复现指南](docs/awq.md)**。校准与推理使用不同的 compressed-tensors 版本，请使用两个独立环境。
 
 ## INT8 KV Cache 设计
 
@@ -63,7 +84,8 @@ ondeviceinfer/
   kv_quantization.py    # FP16/HQQ-compatible INT8 KV Codec
   model.py              # FP16 Qwen3 模型
   quantization.py       # INT8 Weight-only 格式
-  quantized_model.py    # INT8 权重模型
+  quantized_model.py    # INT8 与可插拔压缩 Linear 前向
+  weight_quantization/ # INT4 加载、QDQ 参考、Marlin 适配
   runtime/              # Resident/Sync/Prefetch 权重运行时
 
 benchmarks/
@@ -73,6 +95,11 @@ benchmarks/
   validate_kv_int8_quality.py     # Logits/KL/PPL/Token 质量验证
   profile_nsight_workload.py      # 有界 Nsight 采集入口
   analyze_nsight_sqlite.py        # Copy/Kernel 重叠分析
+  prepare_weight_quant_data.py   # 冻结校准/开发/测试数据
+  calibrate_weight_quant.py      # 分层 AWQ 校准与压缩导出
+  benchmark_weight_quant_models.py # 压缩模型性能对照
+  validate_weight_quant_kernels.py # 实际权重算子验证
+  validate_weight_quant.py       # PPL、Teacher、逐层及生成对照
 
 tests/                    # 单元测试与 CUDA 生命周期测试
 requirements-lock.txt     # 当前实验环境依赖版本
@@ -130,10 +157,10 @@ python benchmarks/quantize_checkpoint.py \
 pytest -q
 ```
 
-当前版本在实验服务器上的结果为：
+本次代码发布的 CPU 回归结果（`CUDA_VISIBLE_DEVICES=''`）为：
 
 ```text
-34 passed
+40 passed, 2 skipped
 ```
 
 部分 CUDA 测试在没有 NVIDIA GPU 时会自动跳过。

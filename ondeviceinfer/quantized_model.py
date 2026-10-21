@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.profiler import record_function
 
-from .attention import build_causal_mask
+from .attention import cached_scaled_dot_product_attention
 from .cache import KVCache, ResidentKVCache
 from .functional import rms_norm
 from .layers import RotaryEmbedding, apply_rotary_pos_emb
@@ -132,10 +132,16 @@ def quantized_decoder_layer_forward(
     *,
     cache: KVCache | None = None,
     stats: QuantizedComputeStats | None = None,
+    linear_backend: object | None = None,
 ) -> Tensor:
     """Execute one Qwen3 decoder layer using INT8 weight-only linears."""
     # Config is kept structural here so tiny synthetic configurations can use
     # the same function without importing a model implementation.
+    def linear(inputs, weights, name, scratch, *, stats=None):
+        if linear_backend is not None:
+            return linear_backend.linear(inputs, weights, name)
+        return int8_weight_only_linear(inputs, weights, name, scratch, stats=stats)
+
     residual = hidden_states
     states = rms_norm(
         hidden_states,
@@ -144,7 +150,7 @@ def quantized_decoder_layer_forward(
     )
     batch_size, query_length, _ = states.shape
 
-    query = int8_weight_only_linear(
+    query = linear(
         states, weights, "self_attn.q_proj.weight", scratch, stats=stats
     ).view(
         batch_size,
@@ -152,7 +158,7 @@ def quantized_decoder_layer_forward(
         config.num_attention_heads,  # type: ignore[attr-defined]
         config.head_dim,  # type: ignore[attr-defined]
     )
-    key = int8_weight_only_linear(
+    key = linear(
         states, weights, "self_attn.k_proj.weight", scratch, stats=stats
     ).view(
         batch_size,
@@ -160,7 +166,7 @@ def quantized_decoder_layer_forward(
         config.num_key_value_heads,  # type: ignore[attr-defined]
         config.head_dim,  # type: ignore[attr-defined]
     )
-    value = int8_weight_only_linear(
+    value = linear(
         states, weights, "self_attn.v_proj.weight", scratch, stats=stats
     ).view(
         batch_size,
@@ -177,32 +183,22 @@ def quantized_decoder_layer_forward(
     value = value.transpose(1, 2)
     query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-    if cache is not None:
-        key, value = cache.update(layer_idx, key, value)
-    key_length = key.shape[-2]
-    attention_mask = None
-    is_causal = query_length > 1 and key_length == query_length
-    if query_length > 1 and key_length != query_length:
-        attention_mask = build_causal_mask(
-            query_length, key_length, device=query.device
-        )
-
-    with nvtx_range(f"kv_attention::layer_{layer_idx}"):
-        attention_output = F.scaled_dot_product_attention(
+    with nvtx_range(f"kv_attention::layer_{layer_idx}::batch_{batch_size}"):
+        attention_output = cached_scaled_dot_product_attention(
             query,
             key,
             value,
-            attn_mask=attention_mask,
+            layer_idx=layer_idx,
+            cache=cache,
+            attention_mask=None,
             dropout_p=0.0,
-            is_causal=is_causal,
-            enable_gqa=True,
         )
     attention_output = attention_output.transpose(1, 2).contiguous().view(
         batch_size,
         query_length,
         config.num_attention_heads * config.head_dim,  # type: ignore[attr-defined]
     )
-    attention_output = int8_weight_only_linear(
+    attention_output = linear(
         attention_output,
         weights,
         "self_attn.o_proj.weight",
@@ -217,13 +213,13 @@ def quantized_decoder_layer_forward(
         weights["post_attention_layernorm.weight"],
         config.rms_norm_eps,  # type: ignore[attr-defined]
     )
-    gate = int8_weight_only_linear(
+    gate = linear(
         states, weights, "mlp.gate_proj.weight", scratch, stats=stats
     )
-    up = int8_weight_only_linear(
+    up = linear(
         states, weights, "mlp.up_proj.weight", scratch, stats=stats
     )
-    mlp_output = int8_weight_only_linear(
+    mlp_output = linear(
         F.silu(gate) * up,
         weights,
         "mlp.down_proj.weight",
@@ -243,6 +239,7 @@ class QuantizedQwen3ForCausalLM:
         *,
         device: str | torch.device,
         profile_compute: bool = False,
+        linear_backend: object | None = None,
     ) -> None:
         self.store = store
         self.runtime = runtime
@@ -254,8 +251,10 @@ class QuantizedQwen3ForCausalLM:
         self.rotary_emb = RotaryEmbedding(
             self.config.head_dim, self.config.rope_theta
         ).to(self.device)
+        self.linear_backend = linear_backend
         self.dequant_scratch = torch.empty(
-            store.max_dequant_elements, device=self.device, dtype=self.dtype
+            store.max_dequant_elements if linear_backend is None else 0,
+            device=self.device, dtype=self.dtype,
         )
         self.compute_stats = QuantizedComputeStats(enabled=profile_compute)
 
@@ -319,7 +318,10 @@ class QuantizedQwen3ForCausalLM:
                         self.dequant_scratch,
                         cache=cache,
                         stats=self.compute_stats,
+                        linear_backend=self.linear_backend,
                     )
+            if getattr(self, "layer_probe_callback", None) is not None:
+                self.layer_probe_callback(layer_idx, hidden_states)
             if cache is not None and hasattr(cache, "after_layer"):
                 cache.after_layer(layer_idx)  # type: ignore[attr-defined]
             self.runtime.after_layer(layer_idx)  # type: ignore[attr-defined]

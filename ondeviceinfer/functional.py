@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from .attention import build_causal_mask
+from .attention import cached_scaled_dot_product_attention
 from .cache import KVCache
 from .config import Qwen3Config
 from .layers import apply_rotary_pos_emb
@@ -57,24 +57,14 @@ def decoder_layer_forward(
     value = value.transpose(1, 2)
     query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-    if cache is not None:
-        key, value = cache.update(layer_idx, key, value)
-    key_length = key.shape[-2]
-    attention_mask = None
-    is_causal = query_length > 1 and key_length == query_length
-    if query_length > 1 and key_length != query_length:
-        attention_mask = build_causal_mask(
-            query_length, key_length, device=query.device
-        )
-
-    attention_output = F.scaled_dot_product_attention(
+    attention_output = cached_scaled_dot_product_attention(
         query,
         key,
         value,
-        attn_mask=attention_mask,
+        layer_idx=layer_idx,
+        cache=cache,
+        attention_mask=None,
         dropout_p=0.0,
-        is_causal=is_causal,
-        enable_gqa=True,
     )
     attention_output = attention_output.transpose(1, 2).contiguous().view(
         batch_size,

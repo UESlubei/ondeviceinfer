@@ -35,3 +35,12 @@ outputs/
 .idea/
 .vscode/
 .DS_Store
+
+# Local AWQ calibration data, environments and publication staging
+/datasets/
+/artifacts/
+/github_publication/
+*.log
+*.whl
+*.parquet
+*.arrow
